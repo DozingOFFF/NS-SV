@@ -1,7 +1,6 @@
 # NS-SV: Neural Scoring for speaker verification
 
 This is an open-source project that develops a novel framework for speaker verification. The code is developed based on [sunine](https://gitlab.com/csltstu/sunine).
-
 In this project, our goal is to design a "general solver", which could operate effectively across a wide range of real-world scenarios (eg. clean, noisy, multi-speaker).
 
 If you find this project beneficial for your research, we kindly encourage you to cite [our paper](https://arxiv.org/abs/2410.16428).
