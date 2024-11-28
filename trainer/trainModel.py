@@ -126,11 +126,19 @@ class trainModel(LightningModule):
         frames_len = np.random.randint(self.hparams.min_frames, self.hparams.max_frames)
         print("\nChunk size is: ", frames_len)
 
-        train_dataset = Train_Dataset(self.hparams.train_list,self.hparams.train_path, self.hparams.musan_path, self.hparams.rir_path, max_frames=frames_len)
-        if self.hparams.devices == 1:
-            batch_sampler = BalancedBatchSampler(dataset=train_dataset, **dict(self.hparams))
-        else:
-            batch_sampler = BalancedDistributedSampler(dataset=train_dataset, **dict(self.hparams))
+        if self.hparams.mode == 'clean':
+            train_dataset = Train_Dataset(**dict(self.hparams))
+            if self.hparams.devices == 1:
+                batch_sampler = BalancedBatchSampler(dataset=train_dataset, start_epoch=self.current_epoch, **dict(self.hparams))
+            else:
+                batch_sampler = BalancedDistributedSampler(dataset=train_dataset, start_epoch=self.current_epoch, **dict(self.hparams))
+        elif self.hparams.mode == 'multi':
+            train_dataset = Mix_Train_Dataset(**dict(self.hparams))
+            if self.hparams.devices == 1:
+                batch_sampler = MixBatchSampler(dataset=train_dataset, **dict(self.hparams))
+            else:
+                batch_sampler = BalancedDistributedSampler(dataset=train_dataset, **dict(self.hparams))
+
         self.batch_sampler = batch_sampler
 
         loader = torch.utils.data.DataLoader(
@@ -149,7 +157,8 @@ class trainModel(LightningModule):
 
         print("\nnumber of trials: ", len(enroll_list))
 
-        test_dataset = Test_Dataset(test_path=self.hparams.test_path, label=label, enroll_list=enroll_list, test_list=test_list, eval_frames=self.hparams.eval_frames, num_eval=0)
+        test_dataset = Test_Dataset(test_path=self.hparams.test_path, label=label, enroll_list=enroll_list,
+                                    test_list=test_list, eval_frames=self.hparams.eval_frames, num_eval=0)
         loader = DataLoader(test_dataset, num_workers=0, batch_size=1, shuffle=False)
         return loader
 

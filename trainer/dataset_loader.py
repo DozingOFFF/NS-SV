@@ -98,7 +98,7 @@ class AugmentWAV(object):
 
 
 class Train_Dataset(Dataset):
-    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames):
+    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, **kwargs):
         self.train_path = train_path
         self.max_frames = max_frames
         # Load data & labels
@@ -169,7 +169,6 @@ class BalancedBatchSampler(Sampler):
         self.drop_last = drop_last
         self.samespk_dict = self._samespk_indices(self.dataset.data_label)
         self.epoch = start_epoch
-        self.it = start_epoch * self.__len__()
         with open(hardspk_path, 'r') as file:
             self.hardspk_dict = json.load(file)
 
@@ -181,11 +180,9 @@ class BalancedBatchSampler(Sampler):
             batch.append (self.return_indices(i))
             if len (batch) == self.batch_size:
                 yield batch
-                self.it += 1
                 batch = []
         if len (batch) > 0 and not self.drop_last:
             yield batch
-            self.it += 1
         self.epoch += 1
 
     def __len__(self):
@@ -432,35 +429,25 @@ class Test_Dataset(Dataset):
 
 
 class MixBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, hardspk_path, drop_last = True, max_pos_prob=0.5, min_pos_prob=0.2, start_epoch=0, **kwargs):
+    def __init__(self, dataset, batch_size, drop_last = True, pos_prob=0.5, **kwargs):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.pos_prob = max_pos_prob
-        self.max_pos_prob = max_pos_prob
-        self.min_pos_prob = min_pos_prob
+        self.pos_prob = pos_prob
         self.drop_last = drop_last
         self.samespk_dict = self._samespk_indices(self.dataset.data_label)
-        self.epoch = start_epoch
-        self.it = start_epoch * self.__len__()
-        with open(hardspk_path, 'r') as file:
-            self.hardspk_dict = json.load(file)
 
     def __iter__(self):
         enroll_indices = np.arange(0, len(self.dataset))
         self.enroll_indices = self._shuffle_indices(enroll_indices)
         batch = []
-        self.pos_prob_decrease()
         for i in range(len(enroll_indices)):
             batch.append (self.return_indices(i))
             if len (batch) == self.batch_size:
                 yield batch
-                self.it += 1
-                self.pos_prob_decrease()
                 batch = []
         if len (batch) > 0 and not self.drop_last:
             yield batch
-            self.it += 1
-        self.epoch += 1
+
 
     def __len__(self):
         if self.drop_last:
@@ -468,12 +455,6 @@ class MixBatchSampler(Sampler):
         else:
             return (len(self.dataset) + self.batch_size - 1) // self.batch_size
 
-
-    def pos_prob_decrease(self):
-        if self.epoch >= 5 and self.epoch <10:
-            self.pos_prob = self.min_pos_prob + (self.max_pos_prob - self.min_pos_prob) * (1 - (self.it-5*self.__len__()) / (5*self.__len__()))
-        elif self.epoch >= 10:
-            self.pos_prob = self.min_pos_prob
 
     def return_indices(self, i):
         return [self.enroll_indices[i],
@@ -503,17 +484,154 @@ class MixBatchSampler(Sampler):
 
     def _neg_random_sample(self, index):
         # 随机获取与之来源于不同说话人的语音
-        hardspk_list = self.hardspk_dict[self.dataset.label_name[self.dataset.data_label[index]]]
-        hardspk_index = self.dataset.label_name[random.choice(hardspk_list)]
-        start, end = self.samespk_dict[hardspk_index]
+        start, end = self.samespk_dict[self.dataset.data_label[index]]
+        # neg_arr = np.setdiff1d(np.arange(0, len(self.dataset)), np.arange(start, end+1))
+        random_negs = np.random.randint(0, len(self.dataset), size=5)
+        filtered_negs = random_negs[(random_negs < start) | (random_negs > end)]
+        return np.random.choice(filtered_negs)
+
+
+
+
+class MixDistributedSampler(DistributedSampler):
+    def __init__(self, dataset: Dataset, batch_size, num_replicas: Optional[int] = None,
+                 pos_prob = 0.5, rank: Optional[int] = None, shuffle: bool = True,
+                 seed: int = 0, drop_last: bool = True, **kwargs) -> None:
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            rank = dist.get_rank()
+        if rank >= num_replicas or rank < 0:
+            raise ValueError(
+                f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]")
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.drop_last = drop_last
+        self.pos_prob = pos_prob
+
+        # If the dataset length is evenly divisible by # of replicas, then there
+        # is no need to drop any data, since the dataset will be split equally.
+        if self.drop_last and len(self.dataset) % self.num_replicas != 0:  # type: ignore[arg-type]
+            # Split to nearest available length that is evenly divisible.
+            # This is to ensure each rank receives the same amount of data when
+            # using this Sampler.
+            self.num_samples = math.ceil(
+                (len(self.dataset) - self.num_replicas) / self.num_replicas  # type: ignore[arg-type]
+            )
+        else:
+            self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)  # type: ignore[arg-type]
+        self.total_size = self.num_samples * self.num_replicas
+        self.shuffle = shuffle
+        self.seed = seed
+        self.samespk_dict = self._samespk_indices(self.dataset.data_label)
+
+        print('rank:', self.rank)
+
+    def __iter__(self):
+        if self.shuffle:
+            # deterministically shuffle based on epoch and seed
+            g = torch.Generator()
+            g.manual_seed(self.seed + self.epoch)
+            # 确保每个epoch在多张卡上得到的indices一样
+            print('dataloader seed:', self.seed + self.epoch)
+            indices = torch.randperm(len(self.dataset), generator=g).tolist()  # type: ignore[arg-type]
+        else:
+            indices = list(range(len(self.dataset)))  # type: ignore[arg-type]
+
+        if not self.drop_last:
+            # add extra samples to make it evenly divisible
+            padding_size = self.total_size - len(indices)
+            if padding_size <= len(indices):
+                indices += indices[:padding_size]
+            else:
+                indices += (indices * math.ceil(padding_size / len(indices)))[:padding_size]
+        else:
+            # remove tail of data to make it evenly divisible.
+            indices = indices[:self.total_size]
+        assert len(indices) == self.total_size
+
+        # subsample
+        # 获取单卡上的数据索引
+        indices = indices[self.rank:self.total_size:self.num_replicas]
+        assert len(indices) == self.num_samples
+
+
+        self.enroll_indices = indices
+        batch = []
+        for i in range(len(self.enroll_indices)):
+            batch.append(self.return_indices(i))
+            if len(batch) == self.batch_size:
+                yield batch
+                batch = []
+        if len(batch) > 0 and not self.drop_last:
+            yield batch
+
+
+    def __len__(self) -> int:
+        if self.drop_last:
+            return self.num_samples // self.batch_size
+        else:
+            return (self.num_samples + self.batch_size - 1) // self.batch_size
+
+    def set_epoch(self, epoch: int) -> None:
+        r"""
+        Set the epoch for this sampler.
+
+        When :attr:`shuffle=True`, this ensures all replicas
+        use a different random ordering for each epoch. Otherwise, the next iteration of this
+        sampler will yield the same ordering.
+
+        Args:
+            epoch (int): Epoch number.
+        """
+        self.epoch = epoch
+
+    def return_indices(self, i):
+        return [self.enroll_indices[i],
+                self._pos_random_sample(self.enroll_indices[i]) if i%self.batch_size < self.batch_size*self.pos_prob
+                else self._neg_random_sample(self.enroll_indices[i]),
+                self._neg_random_sample(self.enroll_indices[i]),
+                1 if i%self.batch_size < self.batch_size*self.pos_prob else 0]
+
+
+    def _shuffle_indices(self, indices):
+        np.random.shuffle(indices)
+        return indices
+
+    def _samespk_indices(self, data_label):
+        samespk_dict = {}
+        numspk_dict = Counter(data_label)
+        sorted_numspk_keys = OrderedDict(sorted(numspk_dict.items(), key=lambda x: data_label.index(x[0])))
+        sum = 0
+        for k in sorted_numspk_keys:
+            samespk_dict[k] = [sum, sum + numspk_dict[k]-1]
+            sum += numspk_dict[k]
+        return samespk_dict
+
+    def _pos_random_sample(self, index):
+        # 随机获取与之来源于同一个说话人的语音
+        start, end = self.samespk_dict[self.dataset.data_label[index]]
         return np.random.randint(start, end+1)
 
+    def _neg_random_sample(self, index):
+        # 随机获取与之来源于不同说话人的语音
+        start, end = self.samespk_dict[self.dataset.data_label[index]]
+        # neg_arr = np.setdiff1d(np.arange(0, len(self.dataset)), np.arange(start, end+1))
+        random_negs = np.random.randint(0, len(self.dataset), size=5)
+        filtered_negs = random_negs[(random_negs < start) | (random_negs > end)]
+        return np.random.choice(filtered_negs)
 
 
 
 
 class Mix_Train_Dataset(Dataset):
-    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, aug_prob):
+    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, aug_prob, **kwargs):
         self.train_path = train_path
         self.max_frames = max_frames
         self.max_audio = max_frames * 160 + 240
