@@ -64,6 +64,12 @@ python main.py --config conf/ns_clean.yaml
 python main.py --config conf/ns_multi.yaml
 ```
 
+#### Step5: average model checkpoints
+
+```base
+python steps/avg_model.py
+```
+
 ## Citation
 
 ```base
