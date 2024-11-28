@@ -38,7 +38,7 @@ trials_path: 'The path of evaluation trial list'
 
 # Load and save
 pretrain: 'pretrained model checkpoint for enroll model'
-checkpoint_path: 'pretrained model checkpoint for ns clean model'
+checkpoint_path: './source/resnet34_avg.ckpt'
 save_top_k: -1
 save_path: 'resnet34_transformer_multi'
 
