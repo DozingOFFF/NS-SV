@@ -138,10 +138,10 @@ class ResNet(nn.Module):
         return x
 
 
-def Speaker_Encoder(embedding_dim=256, **kwargs):
+def Speaker_Encoder(**kwargs):
     # Number of filters
     num_filters = [32, 64, 128, 256]
-    model = ResNet(BasicBlock, [3, 4, 6, 3], num_filters, embedding_dim, **kwargs)
+    model = ResNet(BasicBlock, [3, 4, 6, 3], num_filters, **kwargs)
     return model
 
 

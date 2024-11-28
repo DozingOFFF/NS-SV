@@ -137,7 +137,7 @@ class trainModel(LightningModule):
             if self.hparams.devices == 1:
                 batch_sampler = MixBatchSampler(dataset=train_dataset, **dict(self.hparams))
             else:
-                batch_sampler = BalancedDistributedSampler(dataset=train_dataset, **dict(self.hparams))
+                batch_sampler = MixDistributedSampler(dataset=train_dataset, **dict(self.hparams))
 
         self.batch_sampler = batch_sampler
 

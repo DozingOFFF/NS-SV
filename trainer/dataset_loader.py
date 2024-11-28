@@ -51,7 +51,7 @@ def loadWAV(filename, max_frames, evalmode=False, num_eval=10):
 
 def norm_wav(wav):
     #  norm wav value to [-1.0, 1.0]
-    norm = max(np.absolute(wav))
+    norm = np.max(np.absolute(wav))
     if norm > 1e-5:
         wav = wav / norm
     return wav, norm
@@ -98,8 +98,9 @@ class AugmentWAV(object):
 
 
 class Train_Dataset(Dataset):
-    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, **kwargs):
+    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, aug_prob, **kwargs):
         self.train_path = train_path
+        self.aug_prob = aug_prob
         self.max_frames = max_frames
         # Load data & labels
         self.data_list = []
@@ -496,7 +497,7 @@ class MixBatchSampler(Sampler):
 class MixDistributedSampler(DistributedSampler):
     def __init__(self, dataset: Dataset, batch_size, num_replicas: Optional[int] = None,
                  pos_prob = 0.5, rank: Optional[int] = None, shuffle: bool = True,
-                 seed: int = 0, drop_last: bool = True, **kwargs) -> None:
+                 sampler_seed: int = 0, drop_last: bool = True, **kwargs) -> None:
         if num_replicas is None:
             if not dist.is_available():
                 raise RuntimeError("Requires distributed package to be available")
@@ -528,7 +529,7 @@ class MixDistributedSampler(DistributedSampler):
             self.num_samples = math.ceil(len(self.dataset) / self.num_replicas)  # type: ignore[arg-type]
         self.total_size = self.num_samples * self.num_replicas
         self.shuffle = shuffle
-        self.seed = seed
+        self.seed = sampler_seed
         self.samespk_dict = self._samespk_indices(self.dataset.data_label)
 
         print('rank:', self.rank)
@@ -594,10 +595,10 @@ class MixDistributedSampler(DistributedSampler):
 
     def return_indices(self, i):
         return [self.enroll_indices[i],
-                self._pos_random_sample(self.enroll_indices[i]) if i%self.batch_size < self.batch_size*self.pos_prob
+                self._pos_random_sample(self.enroll_indices[i]) if i % self.batch_size < self.batch_size * self.pos_prob
                 else self._neg_random_sample(self.enroll_indices[i]),
                 self._neg_random_sample(self.enroll_indices[i]),
-                1 if i%self.batch_size < self.batch_size*self.pos_prob else 0]
+                1 if i % self.batch_size < self.batch_size * self.pos_prob else 0]
 
 
     def _shuffle_indices(self, indices):
@@ -640,12 +641,13 @@ class Mix_Train_Dataset(Dataset):
         self.data_list = []
         self.data_label = []
         lines = open(train_list).read().splitlines()
-        # dictkeys = list (set ([x.split ()[0] for x in lines]))
-        # dictkeys.sort ()
-        # dictkeys = {key: ii for ii, key in enumerate (dictkeys)}
+        dictkeys = list(set([x.split()[0] for x in lines]))
+        dictkeys.sort()
+        dictkeys = {key: ii for ii, key in enumerate(dictkeys)}
         self.label_name = {}
         for index, line in enumerate(lines):
-            speaker_label = int(line.split()[2])
+            # speaker_label = int(line.split()[2])
+            speaker_label = int(dictkeys[line.split()[0]])
             file_name = os.path.join(train_path, line.split()[1])
             self.data_label.append(speaker_label)
             self.data_list.append(file_name)
