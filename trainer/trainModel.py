@@ -55,8 +55,9 @@ class trainModel(LightningModule):
 
 
     def training_epoch_end(self, outputs):
-        self.eval()
-        self.evaluate()
+        if (self.current_epoch + 1) % self.hparams.eval_interval == 0:
+            self.eval()
+            self.evaluate()
         print('\nlr:', self.optimizers().param_groups[0]['lr'])
 
     
@@ -111,7 +112,6 @@ class trainModel(LightningModule):
         predictions = (pre_score >= 0.5).int ()  # 暂时假设阈值为0.5
         accuracy = (predictions == label_is_match).float ().mean ()
         loss = BCE_loss
-        self.log('bce_loss', BCE_loss, prog_bar=True)
         self.log('train_loss', loss)
         self.log('acc', accuracy, prog_bar=True)
         output = OrderedDict({
@@ -205,7 +205,7 @@ class trainModel(LightningModule):
             "monitor": 'train_loss',
             'interval': 'epoch',
         }
-        print("init {} optimizer with learning rate {}".format("Adam", optimizer.param_groups[0]['lr']))
+        print("init {} optimizer with learning rate {}".format("ReduceLROnPlateau", optimizer.param_groups[0]['lr']))
         return { "optimizer": optimizer, "lr_scheduler": scheduler}
 
 
