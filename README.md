@@ -38,10 +38,30 @@ Data simulation tool is provided. Users can generate datasets and trial lists fo
 python steps/create_evaldata.py
 ```
 
-### Training
+### Model Training
+
+#### Step1: prepare enroll model
+
+Users can directly use our pre-trained model `source\resnet34_avg.ckpt`, or retrain a new model using [sunine](https://gitlab.com/csltstu/sunine).
+
+#### Step2: prepare hard speaker dict
+
+Prepare hard speaker dict to do difficult sample mining while training model for clean scenario.
 
 ```base
-python main.py --config <path of config file>
+python steps/create_hardspk_dict.py
+```
+
+#### Step3: train a clean-scenario model
+
+```base
+python main.py --config conf/ns_clean.yaml
+```
+
+#### Step4: train a multi-scenario model
+
+```base
+python main.py --config conf/ns_multi.yaml
 ```
 
 ## Citation
