@@ -48,7 +48,7 @@ Users can directly use our pre-trained model `source\resnet34_avg.ckpt`, or retr
 
 #### Step2: Prepare hard speaker dict
 
-Prepare hard speaker dict to do difficult sample mining while training model for clean scenario.
+Prepare hard speaker dict to do difficult sample mining.
 
 ```base
 python steps/create_hardspk_dict.py
