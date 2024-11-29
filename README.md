@@ -30,6 +30,8 @@ pip install -r requirements.txt
 
 ## Methodologies
 
+Note that the configuration files should be modified before running the commands.
+
 ### Data simulation
 
 Data simulation tool is provided. Users can generate datasets and trial lists for the test scenarios, thereby facilitating the reproduction of the validation results from our paper.
@@ -40,11 +42,11 @@ python steps/create_evaldata.py
 
 ### Model Training
 
-#### Step1: prepare enroll model
+#### Step1: Prepare enroll model
 
 Users can directly use our pre-trained model `source\resnet34_avg.ckpt`, or retrain a new model using [sunine](https://gitlab.com/csltstu/sunine).
 
-#### Step2: prepare hard speaker dict
+#### Step2: Prepare hard speaker dict
 
 Prepare hard speaker dict to do difficult sample mining while training model for clean scenario.
 
@@ -52,13 +54,13 @@ Prepare hard speaker dict to do difficult sample mining while training model for
 python steps/create_hardspk_dict.py
 ```
 
-#### Step3: train a clean-scenario model
+#### Step3: Train model for clean-scenario
 
 ```base
 python main.py --config conf/ns_clean.yaml
 ```
 
-#### Step4: train a multi-scenario model
+#### Step4: Train model for multi-scenario
 
 ```base
 python main.py --config conf/ns_multi.yaml
@@ -68,6 +70,12 @@ python main.py --config conf/ns_multi.yaml
 
 ```base
 python steps/avg_model.py
+```
+
+### Model Evaluation
+
+```base
+bash eval.sh
 ```
 
 ## Citation
