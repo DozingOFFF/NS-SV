@@ -2,25 +2,29 @@
 
 exp_dir: 'exp'
 mode: 'clean'
+devices: 1
 
 # Data Loader
 batch_size: 256
 num_workers: 6
 min_frames: 200
 max_frames: 201
+enroll_frames: 400
 eval_frames: 0
 sample_rate: 16000
-aug_prob: 0.8
+aug_prob: 0.6
+enroll_num: 200
 
 # Training details
-max_epochs: 40
+max_epochs: 60
 nnet_type: 'ResNet34'
 pooling_type: 'ASP'
+loss_function: 'weightbce'
+pos_weight: 0.95
 
 
 # Testing details
 eval_interval: 1
-eval_size: 5000
 
 # Optimizer
 learning_rate: 0.0001
@@ -37,11 +41,10 @@ test_path: 'The directory of evaluation data'
 trials_path: 'The path of evaluation trial list'
 
 # Load and save
-pretrain: './source/resnet34_avg.ckpt'
+pretrain: 'The path of pretrained enroll network'
 checkpoint_path: null
 save_top_k: -1
 save_path: 'resnet34_transformer_clean'
-hardspk_path: 'The path of hard speaker sampling dict'
 
 # Model definition
 n_mels: 80
@@ -49,7 +52,7 @@ embedding_dim: 256
 hidden_dim: 256
 d_ff: 512
 num_heads: 4
-num_layers: 8
+num_layers: 1
 max_len: 500
 
 # Test mode
