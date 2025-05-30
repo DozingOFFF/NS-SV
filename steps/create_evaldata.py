@@ -16,10 +16,13 @@ def norm_wav(wav):
     return wav, norm
 
 
-def Create_data(input_dir, output_dir, trial_path, overlap_min, overlap_max, snr_min, snr_max):
+def Create_data(input_dir, output_dir, trial_path, noise_list, overlap_min, overlap_max, snr_min, snr_max):
     # Get all utterance paths in Vox1 trials
     utt_paths = glob.glob(os.path.join(input_dir, '*/*/*.wav'))
     print('Sucessfully obtain all utterances from {}'.format(trial_path))
+    # Get all noise paths in noise_list
+    noise_lines = open(trial_path, 'r').readlines()
+    print('Sucessfully obtain all noise from {}'.format(noise_list))
 
     # Sort the order of trials, let the test utterances in character order
     lines = open(trial_path, 'r').readlines()
@@ -32,8 +35,8 @@ def Create_data(input_dir, output_dir, trial_path, overlap_min, overlap_max, snr
 
     def process_seg():
         # Randomly choose one utt for test to combine
-        audio1_path, audio2_path, audio1_name, audio2_name, snr, overlap_ratio = choose_param(
-            segs_list, enroll_spk_list, utt_paths, overlap_min, overlap_max, snr_min, snr_max)
+        audio1_path, audio2_path, noise_path, audio1_name, audio2_name, snr, overlap_ratio = choose_param(
+            segs_list, enroll_spk_list, utt_paths, noise_lines, overlap_min, overlap_max, snr_min, snr_max)
 
         # Randomly change the location of test and interfere
         if random.uniform(0, 1) < 0.5:
@@ -45,9 +48,10 @@ def Create_data(input_dir, output_dir, trial_path, overlap_min, overlap_max, snr
         concat_audio, _ = concat(audio1_path, audio2_path, snr)
         mix_audio, _ = mix(audio1_path, audio2_path, snr)
         overlap_audio, _ = overlap(audio1_path, audio2_path, snr, overlap_ratio)
+        noisy_audio, _ = noisy(audio1_path, noise_path, snr)
 
         # Save wav and trial
-        save_waveform(output_dir, audio1_name, concat_audio, mix_audio, overlap_audio)
+        save_waveform(output_dir, audio1_name, concat_audio, mix_audio, overlap_audio, noisy_audio)
         for segs in segs_list:
             write_txt(segs, output_dir, trial_path)
 
@@ -79,7 +83,7 @@ def Create_data(input_dir, output_dir, trial_path, overlap_min, overlap_max, snr
 
 
 
-def choose_param(segs_list, enroll_spk_list, utt_paths, overlap_min, overlap_max, snr_min, snr_max):
+def choose_param(segs_list, enroll_spk_list, utt_paths, noise_lines, overlap_min, overlap_max, snr_min, snr_max):
     snr = random.randint(snr_min * 2, snr_max * 2) / 2
     overlap_ratio = random.uniform(overlap_min, overlap_max)
     audio1_path = os.path.join(input_dir, segs_list[-1][2])
@@ -101,7 +105,9 @@ def choose_param(segs_list, enroll_spk_list, utt_paths, overlap_min, overlap_max
 
     audio1_name = audio1_path.replace(input_dir + '/', '')
     audio2_name = audio2_path.replace(input_dir + '/', '')
-    return audio1_path, audio2_path, audio1_name, audio2_name, snr, overlap_ratio
+
+    noise_path = noise_lines[random.randint(0, len(noise_lines))]
+    return audio1_path, audio2_path, noise_path, audio1_name, audio2_name, snr, overlap_ratio
 
 
 
@@ -172,8 +178,35 @@ def mix(audio1_path, audio2_path, snr):
     return mixed_audio, norm
 
 
-def save_waveform(output_dir, audio1_name, concat_audio, mix_audio, overlap_audio):
-    for mode, audio in zip(['concat', 'mix', 'overlap'], [concat_audio, mix_audio, overlap_audio]):
+
+def noisy(audio_path, moise_path, snr):
+    _, audio1 = wavfile.read(audio_path, "rb")
+    _, audio2 = wavfile.read(moise_path, "rb")
+    audio1, _ = norm_wav(audio1.astype(np.float32) / (1 << 15))
+    audio2, _ = norm_wav(audio2.astype(np.float32) / (1 << 15))
+
+    # Adjust energy ratio
+    audio_db_1 = 10 * np.log10(np.mean(audio1 ** 2) + 1e-4)
+    audio_db_2 = 10 * np.log10(np.mean(audio2 ** 2) + 1e-4)
+    audio2 = np.sqrt(10 ** ((audio_db_1 - audio_db_2 - snr) / 10)) * audio2
+
+    # Repeat shorter audio to match the length of the longer audio
+    if len(audio1) > len(audio2):
+        audio2 = np.tile(audio2, (len(audio1) // len(audio2) + 1))[:len(audio1)]
+    elif len(audio2) > len(audio1):
+        startframe = random.randint(0, audio2.shape[0] - audio1.shape[0])
+        audio2 = audio2[startframe:startframe + audio1.shape[0]]
+
+    # Mix the audio
+    mixed_audio = audio1 + audio2
+
+    # Normalize the mixed audio
+    mixed_audio, norm = norm_wav(mixed_audio)
+    return mixed_audio, norm
+
+
+def save_waveform(output_dir, audio1_name, concat_audio, mix_audio, overlap_audio, noisy_audio):
+    for mode, audio in zip(['concat', 'mix', 'overlap', 'noisy'], [concat_audio, mix_audio, overlap_audio, noisy_audio]):
         target_output_dir = os.path.join(output_dir, mode)
         if not os.path.exists(target_output_dir):
             os.mkdir(target_output_dir)
@@ -186,7 +219,7 @@ def save_waveform(output_dir, audio1_name, concat_audio, mix_audio, overlap_audi
 
 def write_txt(segs, output_dir, trial_path):
     trial_name = os.path.basename(trial_path)
-    for mode in ['concat', 'mix', 'overlap']:
+    for mode in ['concat', 'mix', 'overlap', 'noisy']:
         with open(os.path.join(output_dir, trial_name.replace('.txt', f'-{mode}.txt')), "a") as t:
             t.write(segs[0] + ' ' + os.path.join(input_dir, segs[1]) + ' ' +
                     os.path.join(output_dir, segs[2].replace('.wav', f'-{mode}.wav')))
@@ -197,12 +230,13 @@ def write_txt(segs, output_dir, trial_path):
 if __name__ == '__main__':
     input_dir = ''  # the directory of eval data
     trial_path = '' # the path of trial_list
+    noise_list = '' # the path of noise_list sampled from MUSAN
     output_dir = './data'
 
     overlap_min = 0.1
     overlap_max = 0.9
     snr_min = -3.0
     snr_max = 3.0
-    random.seed(10)
+    random.seed(0)
 
-    Create_data(input_dir, output_dir, trial_path, overlap_min, overlap_max, snr_min, snr_max)
+    Create_data(input_dir, output_dir, trial_path, noise_list, overlap_min, overlap_max, snr_min, snr_max)
