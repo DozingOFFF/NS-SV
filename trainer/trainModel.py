@@ -50,73 +50,107 @@ class trainModel(LightningModule):
 
         # 3. Loss / Classifier
 
-        self.BCEloss = nn.BCELoss()
-
+        WeightBCEloss = importlib.import_module('loss.' + self.hparams.loss_function).__getattribute__('LossFunction')
+        self.BCEloss = WeightBCEloss(pos_weight=self.hparams.pos_weight)
+        self.e_num = self.hparams.enroll_num
+        self.expand_index = self.get_index(self.e_num)
+    
+    
+    def get_index(self, step):
+        index = torch.empty((0,))
+        for i in range(self.hparams.batch_size):
+            index = torch.cat((index, torch.arange(i, i + step) % self.hparams.batch_size))
+        return index.int()
 
 
     def training_epoch_end(self, outputs):
         if (self.current_epoch + 1) % self.hparams.eval_interval == 0:
             self.eval()
-            self.evaluate()
+            self.evaluate_fast()
         print('\nlr:', self.optimizers().param_groups[0]['lr'])
 
-    
 
-    def forward(self, enroll_utt, test_utt):
+    def forward(self, enroll_utt, test_utt, extra_utt=None):
         # enroll model
-        with torch.no_grad():
-            enroll_emb = self.enrollmodel(enroll_utt)  # [B, 256]
-            enroll_emb = enroll_emb.unsqueeze(1)
-        enroll_emb = self.scoring_linear2(enroll_emb)
+        if self.hparams.mode == 'clean':
+            with torch.no_grad():
+                enroll_emb = self.enrollmodel(enroll_utt)
+                enroll_emb = enroll_emb.unsqueeze(1)
+            enroll_emb = self.scoring_linear2(enroll_emb)
+            enroll_emb = enroll_emb[self.expand_index, :, :].view(self.hparams.batch_size, self.e_num, -1)
 
-        # scoring model
-        test_feature = self.testencoder(test_utt) # [B, 2560, 26]   [b, f, t]
-        test_feature = test_feature.transpose(1, 2)
-        test_feature = self.scoring_linear1(test_feature)
+            test_feature = self.testencoder(test_utt)
+            test_feature = test_feature.transpose(1, 2)
+            test_feature = self.scoring_linear1(test_feature)
 
-        outputs = self.transformer_model(enroll_emb, test_feature)[:, 0, :]
+            output = self.transformer_model(enroll_emb, test_feature)[:, :self.e_num, :]
 
-        score = self.mlp(outputs).squeeze(1)
+        elif self.hparams.mode == 'multi':
+            with torch.no_grad():
+                enroll_emb = self.enrollmodel(enroll_utt)
+                enroll_emb = enroll_emb.unsqueeze(1)
+                extra_emb = self.enrollmodel(extra_utt)
+                extra_emb = extra_emb.unsqueeze(1)
+            enroll_emb = self.scoring_linear2(enroll_emb)
+            extra_emb = self.scoring_linear2(extra_emb)
+            enroll_emb = enroll_emb[self.expand_index, :, :].view(self.hparams.batch_size, self.e_num, -1)
+            enroll_emb = torch.cat((extra_emb, enroll_emb), dim=1)
+
+            test_feature = self.testencoder(test_utt)
+            test_feature = test_feature.transpose(1, 2)
+            test_feature = self.scoring_linear1(test_feature)
+
+            output = self.transformer_model(enroll_emb, test_feature)[:, :self.e_num+1, :]
+
+
+        score = self.mlp(output)
+        score = score.reshape(-1, 1).squeeze(1)
         score = torch.sigmoid(score)
 
         return score
 
 
-
-    def evaluate_forward(self, enroll_utt, test_utt):
-        # enroll model
-        with torch.no_grad():
-            enroll_emb = self.enrollmodel(enroll_utt)  # [B, 256]
-            enroll_emb = enroll_emb.unsqueeze(1)
-        enroll_emb = self.scoring_linear2(enroll_emb)
+    def evaluate_forward(self, enroll_embs, test_utt):
+        enroll_embs = self.scoring_linear2(enroll_embs)  # [N, 1, 256]
 
         # scoring model
-        test_feature = self.testencoder(test_utt)  # [B, 2560, 26]   [b, f, t]
+        test_feature, test_emb = self.testencoder(test_utt)
         test_feature = test_feature.transpose(1, 2)
         test_feature = self.scoring_linear1(test_feature)
 
-        outputs = self.transformer_model(enroll_emb, test_feature)[:, 0, :]
-
-        score = self.mlp(outputs).squeeze(1)
+        outputs = self.transformer_model(enroll_embs, test_feature)[:, :enroll_embs.size(0), :]
+        score = self.mlp(outputs).squeeze(1)  # [N]
         score = torch.sigmoid(score)
 
         return score
-
 
 
 
     def training_step(self, batch, batch_idx):
-        enroll_utt, test_utt, label_is_match = batch
-        pre_score = self.forward(enroll_utt, test_utt)
-        BCE_loss = self.BCEloss (pre_score, label_is_match.float ())
-        predictions = (pre_score >= 0.5).int ()  # 暂时假设阈值为0.5
-        accuracy = (predictions == label_is_match).float ().mean ()
+        if self.hparams.mode == 'clean':
+            enroll_utt, test_utt, enroll_label, test_label = batch
+            pre_score = self.forward(enroll_utt, test_utt)
+            enroll_label = enroll_label[self.expand_index]
+            test_label = test_label.repeat_interleave(len(self.expand_index) // self.hparams.batch_size)
+            label_is_match = (enroll_label == test_label).int()
+        elif self.hparams.mode == 'multi':
+            enroll_utt, extra_utt, test_utt, enroll_label, extra_label, test_label, mix_label = batch
+            pre_score = self.forward(enroll_utt, test_utt, extra_utt)
+            enroll_label = enroll_label[self.expand_index].view(-1, self.e_num)
+            enroll_label = torch.cat((extra_label.unsqueeze(1), enroll_label), dim=1).reshape(-1, 1).squeeze(1)
+            test_label_list = torch.cat((test_label.unsqueeze(1), mix_label.unsqueeze(1)), dim=1)
+            test_label_list = test_label_list.repeat_interleave(self.e_num + 1, dim=0)
+            label_is_match = torch.any(enroll_label.unsqueeze(1) == test_label_list, dim=1).int()
+
+        BCE_loss = self.BCEloss(pre_score, label_is_match.float())
+        predictions = (pre_score >= 0.5).int()
+        accuracy = (predictions == label_is_match).float().mean()
         loss = BCE_loss
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, prog_bar=True)
         self.log('acc', accuracy, prog_bar=True)
         output = OrderedDict({
             'loss': loss,
-            })
+        })
         return output
 
 
@@ -164,10 +198,7 @@ class trainModel(LightningModule):
 
 
     def evaluate(self):
-        if self.hparams.evaluate is False:
-            eval_loader = self.test_dataloader(self.trials[np.random.choice(self.trials.shape[0], size=self.hparams.eval_size, replace=False)])
-        else:
-            eval_loader = self.test_dataloader(self.trials)
+        eval_loader = self.test_dataloader(self.trials)
         print("extract eval speaker embedding...")
 
         all_scores = []
@@ -191,6 +222,111 @@ class trainModel(LightningModule):
         mindcf_hard, _ = ComputeMinDcf(fnrs, fprs, thresholds, 0.001, c_miss, c_fa)
         print("Cosine EER: {:.3f}%  minDCF(0.01): {:.5f}  minDCF(0.001): {:.5f}".format(eer*100, mindcf_easy, mindcf_hard))
         self.log('cosine_eer', eer*100, sync_dist=True)
+        self.log('minDCF(0.01)', mindcf_easy, sync_dist=True)
+        self.log('minDCF(0.001)', mindcf_hard, sync_dist=True)
+
+        return eer, th, mindcf_easy, mindcf_hard
+
+    def extract_enroll_embeddings(self, unique_enrolls):
+        enroll_embs_dict = {}
+
+        print("Extract enroll embeddings...")
+        with torch.no_grad():
+            for enroll_id in tqdm(unique_enrolls):
+                enroll_dataset = Test_Dataset(
+                    test_path=self.hparams.test_path,
+                    label=['0'],
+                    enroll_list=[enroll_id],
+                    test_list=[enroll_id],
+                    eval_frames=self.hparams.eval_frames,
+                    num_eval=0
+                )
+                enroll_loader = DataLoader(enroll_dataset, batch_size=1, shuffle=False)
+                enroll_utt, _, _ = next(iter(enroll_loader))
+                enroll_utt = enroll_utt.cuda()
+                enroll_emb = self.enrollmodel(enroll_utt)
+                enroll_embs_dict[enroll_id] = enroll_emb.unsqueeze(1)
+
+        return enroll_embs_dict
+
+    def get_test_utterance(self, test_file):
+        test_dataset = Test_Dataset(
+            test_path=self.hparams.test_path,
+            label=['0'],
+            enroll_list=[test_file],
+            test_list=[test_file],
+            eval_frames=self.hparams.eval_frames,
+            num_eval=0
+        )
+        test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+        test_utt, _, _ = next(iter(test_loader))
+        test_utt = test_utt[:, :, :(self.hparams.max_len - 1) * 8 * 160 + 240].cuda()
+        return test_utt
+
+    def process_trials(self, eval_trials):
+        df = pd.DataFrame(eval_trials, columns=['labels', 'enrolls', 'tests'])
+
+        # 分组并构建字典
+        trials_by_test = {
+            test_file: {
+                'enrolls': group['enrolls'].values,
+                'labels': group['labels'].astype(int).values
+            }
+            for test_file, group in df.groupby('tests')
+        }
+
+        return trials_by_test
+
+    def evaluate_fast(self):
+        eval_trials = self.trials
+
+        print("Start evaluating...")
+
+        # 1. 提取所有注册说话人嵌入向量
+        unique_enrolls = np.unique(eval_trials.T[1])
+        enroll_embs_dict = self.extract_enroll_embeddings(unique_enrolls)
+
+        # 2. 处理trials，按测试语音分组
+        trials_by_test = self.process_trials(eval_trials)
+
+        # 3. 计算得分
+        print("Compute scores...")
+        all_scores = []
+        all_labels = []
+
+        with torch.no_grad():
+            for test_file in tqdm(trials_by_test.keys()):
+                # 获取当前测试文件的trials信息
+                current_trials = trials_by_test[test_file]
+                current_enrolls = current_trials['enrolls']
+                current_labels = current_trials['labels']
+
+                # 获取测试语音
+                test_utt = self.get_test_utterance(test_file)
+
+                # 收集当前测试文件对应的所有注册说话人嵌入向量
+                current_enroll_embs = torch.cat([enroll_embs_dict[enroll_id] for enroll_id in current_enrolls], dim=0)
+
+                # 计算分数
+                scores = self.evaluate_forward(current_enroll_embs, test_utt)
+
+                all_scores.extend(scores.cpu().numpy())
+                all_labels.extend(current_labels)
+
+
+        # 4. 计算性能指标
+        eer, th = compute_eer(all_scores, all_labels)
+
+        c_miss = 1
+        c_fa = 1
+        fnrs, fprs, thresholds = ComputeErrorRates(all_scores, all_labels)
+        mindcf_easy, _, mindcf_easy_fnr, mindcf_easy_fpr = ComputeMinDcf(fnrs, fprs, thresholds, 0.01, c_miss, c_fa)
+        mindcf_hard, _, mindcf_hard_fnr, mindcf_hard_fpr = ComputeMinDcf(fnrs, fprs, thresholds, 0.001, c_miss, c_fa)
+
+        print("Cosine EER: {:.3f}%  minDCF(0.01): {:.5f}  minDCF(0.001): {:.5f}".format(
+            eer * 100, mindcf_easy, mindcf_hard))
+
+        self.log('cosine_eer', eer * 100, sync_dist=True)
         self.log('minDCF(0.01)', mindcf_easy, sync_dist=True)
         self.log('minDCF(0.001)', mindcf_hard, sync_dist=True)
 

@@ -46,15 +46,18 @@ class ScaledDotProductAttention(nn.Module):
         super(ScaledDotProductAttention, self).__init__()
         self.d_k = d_k
 
-    def forward(self, q, k, v):
+    def forward(self, q, k, v, mask=None):
         # |q| : (batch_size, num_heads, q_len, d_k), |k| : (batch_size, num_heads, k_len, d_k), |v| : (batch_size, num_heads, v_len, d_v)
         attn_score = torch.matmul(q, k.transpose(-1, -2)) / np.sqrt(self.d_k)
+        if mask is not None:
+            attn_score = attn_score.masked_fill(mask == 0, float('-inf'))
         # |attn_score| : (batch_size, num_heads, q_len, k_len)
         attn_weights = nn.Softmax(dim=-1)(attn_score)
         # |attn_weights| : (batch_size, num_heads, q_len, k_len)
         output = torch.matmul(attn_weights, v)
         # |output| : (batch_size, num_heads, q_len, d_v)
         return output, attn_weights
+
 
 
 class MultiHeadSelfAttention(nn.Module):
@@ -68,14 +71,14 @@ class MultiHeadSelfAttention(nn.Module):
         self.scaled_dot_product_attn = ScaledDotProductAttention(self.d_k)
         self.linear = nn.Linear(num_heads * self.d_v, embedding_dim)
 
-    def forward(self, Q, K, V):
+    def forward(self, Q, K, V, mask=None):
         # |Q| : (batch_size, q_len, embedding_dim), |K| : (batch_size, k_len, embedding_dim), |V| : (batch_size, v_len, embedding_dim)
         batch_size = Q.size(0)
         q_heads = self.WQ(Q).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         k_heads = self.WK(K).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
         v_heads = self.WV(V).view(batch_size, -1, self.num_heads, self.d_v).transpose(1, 2)
         # |q_heads| : (batch_size, num_heads, q_len, d_k), |k_heads| : (batch_size, num_heads, k_len, d_k), |v_heads| : (batch_size, num_heads, v_len, d_v)
-        attn, attn_weights = self.scaled_dot_product_attn(q_heads, k_heads, v_heads)
+        attn, attn_weights = self.scaled_dot_product_attn(q_heads, k_heads, v_heads, mask)
         # |attn| : (batch_size, num_heads, q_len, d_v)
         # |attn_weights| : (batch_size, num_heads, q_len, k_len)
         attn = attn.transpose(1, 2).contiguous().view(batch_size, -1, self.num_heads * self.d_v)
@@ -112,9 +115,9 @@ class EncoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(p_drop)
         self.layernorm2 = nn.LayerNorm(embedding_dim, eps=1e-6)
 
-    def forward(self, inputs_q, inputs_k, inputs_v):
+    def forward(self, inputs_q, inputs_k, inputs_v, mask=None):
         # |inputs| : (batch_size, seq_len, embedding_dim)
-        attn_outputs, _ = self.mha(inputs_q, inputs_k, inputs_v)
+        attn_outputs, _ = self.mha(inputs_q, inputs_k, inputs_v, mask)
         attn_outputs = self.dropout1(attn_outputs)
         attn_outputs = self.layernorm1(inputs_q + attn_outputs)
         # |attn_outputs| : (batch_size, seq_len(=q_len), embedding_dim)
@@ -129,39 +132,43 @@ class EncoderLayer(nn.Module):
 class TransformerEncoder(nn.Module):
     """TransformerEncoder is a stack of N encoder layers.
     Args:
-        seq_len    (int)    : input sequence length
-        embedding_dim    (int)    : number of expected features in the input
+        hidden_dim   (int)    : dimension of the input feature
         num_layers   (int)    : number of sub-encoder-layers in the encoder
         num_heads    (int)    : number of heads in the multiheadattention models
         p_drop     (float)  : dropout value
         d_ff       (int)    : dimension of the feedforward network model
-        pad_id     (int)    : pad token id
     """
 
     def __init__(self, hidden_dim, num_layers, num_heads, max_len, p_drop=0.1, d_ff=512, **kwargs):
         super(TransformerEncoder, self).__init__()
         self.pos_emb = PositionalEncoding(hidden_dim,max_len+1)
-        # self.pos_emb = nn.Embedding(max_len+1, embedding_dim)
-        # nn.init.normal_(self.pos_emb.weight, mean=0.0, std=1.0)
+        self.etype_emb = nn.Parameter(torch.randn((1, hidden_dim)))
+        self.ttype_emb = nn.Parameter(torch.randn((1, hidden_dim)))
         self.drop_out = nn.Dropout(p=p_drop)
         # layers
         self.layers = nn.ModuleList([EncoderLayer(hidden_dim, num_heads, p_drop, d_ff) for _ in range(num_layers)])
 
-        # layers before classify
-        # self.conv1d = nn.Conv1d(hidden_dim, 256, kernel_size=1, stride=1)
-
 
     def forward(self, enroll_emb, test_feature):
-        inputs = torch.cat((enroll_emb, test_feature), dim=1)
 
         with torch.no_grad():
-            pos_emb = self.pos_emb(inputs).to(torch.cuda.current_device())
-            # pos_ids = torch.arange(0, test_feature.size(1)+1).to(torch.cuda.current_device())
-        # pos_emb = self.pos_emb(pos_ids)
-        outputs = self.drop_out(inputs + pos_emb)
+            pos_emb = self.pos_emb(test_feature).to(torch.cuda.current_device())
+        enroll_emb = enroll_emb + self.etype_emb
+        test_feature = test_feature + self.ttype_emb + pos_emb
+        inputs = torch.cat((enroll_emb, test_feature), dim=1)
+        outputs = self.drop_out(inputs)
 
-        for layer in self.layers:
-            outputs = layer(outputs,outputs,outputs)
+        mask = self.get_attention_mask(enroll_emb.size(1), outputs.size(1), outputs.size(1)).to(
+            torch.cuda.current_device())
+        for i, layer in enumerate(self.layers):
+            outputs = layer(outputs, outputs, outputs, mask)
 
         return outputs
+
+    def get_attention_mask(self, e_len, q_len, k_len):
+        attn_mask = torch.ones((q_len, k_len))
+        diagonal_mask = torch.eye(e_len)
+        attn_mask[:e_len, :e_len] = diagonal_mask
+        attn_mask[e_len:, :e_len] = 0
+        return attn_mask.unsqueeze(0).unsqueeze(0)
 

@@ -64,6 +64,8 @@ class AugmentWAV(object):
         self.noisetypes = ['noise', 'speech', 'music']
         self.noisesnr = {'noise':[0,15], 'speech':[13,20], 'music':[5,15]}
         self.numnoise = {'noise':[1,1], 'speech':[3,7], 'music':[1,1]}
+        self.mixnoisesnr = {'noise': [-3, 3], 'speech': [-3, 3], 'music': [-3, 3]}
+        self.nummixnoise = {'noise': [1, 1], 'speech': [1, 1], 'music': [1, 1]}
         self.noiselist = {}
         augment_files = glob.glob (os.path.join (musan_path, '*/*/*.wav'))
         for file in augment_files:
@@ -73,35 +75,48 @@ class AugmentWAV(object):
         self.rir_files = glob.glob (os.path.join (rir_path, '*/*/*.wav'))
 
     def additive_noise(self, noisecat, audio):
-        clean_db = 10 * np.log10(np.mean(audio ** 2)+1e-4)
+        clean_db = 10 * np.log10(np.mean(audio ** 2) + 1e-4)
         numnoise = self.numnoise[noisecat]
-        noiselist = random.sample(self.noiselist[noisecat], random.randint(numnoise[0],numnoise[1]))
+        noiselist = random.sample(self.noiselist[noisecat], random.randint(numnoise[0], numnoise[1]))
         noises = []
         for noise in noiselist:
             noiseaudio = loadWAV(noise, self.max_frames, evalmode=False)
-            noise_snr = random.uniform(self.noisesnr[noisecat][0],self.noisesnr[noisecat][1])
-            noise_db = 10 * np.log10(np.mean(noiseaudio[0] ** 2)+1e-4)
+            noise_snr = random.uniform(self.noisesnr[noisecat][0], self.noisesnr[noisecat][1])
+            noise_db = 10 * np.log10(np.mean(noiseaudio[0] ** 2) + 1e-4)
             noises.append(np.sqrt(10 ** ((clean_db - noise_db - noise_snr) / 10)) * noiseaudio)
-        audio = np.sum(np.concatenate(noises,axis=0), axis=0, keepdims=True) + audio
-        audio, _ = norm_wav(audio)
-        return audio
+        audio = np.sum(np.concatenate(noises, axis=0), axis=0, keepdims=True) + audio
+        return audio.astype(np.int16).astype(float)
+
+    def additive_mixnoise(self, noisecat, audio):
+        clean_db = 10 * np.log10(np.mean(audio ** 2) + 1e-4)
+        numnoise = self.nummixnoise[noisecat]
+        noiselist = random.sample(self.noiselist[noisecat], random.randint(numnoise[0], numnoise[1]))
+        noises = []
+        for noise in noiselist:
+            noiseaudio = loadWAV(noise, self.max_frames, evalmode=False)
+            noise_snr = random.uniform(self.mixnoisesnr[noisecat][0], self.mixnoisesnr[noisecat][1])
+            noise_db = 10 * np.log10(np.mean(noiseaudio[0] ** 2) + 1e-4)
+            noises.append(np.sqrt(10 ** ((clean_db - noise_db - noise_snr) / 10)) * noiseaudio)
+        audio = np.sum(np.concatenate(noises, axis=0), axis=0, keepdims=True) + audio
+        audio = audio / (np.max(np.abs(audio)) + 1e-4) * 32767
+        return audio.astype(np.int16).astype(float)
 
     def reverberate(self, audio):
         rir_file = random.choice(self.rir_files)
         fs, rir = wavfile.read(rir_file)
         rir = np.expand_dims(rir.astype(float), 0)
-        rir = rir / np.sqrt(np.sum(rir**2))
+        rir = rir / np.sqrt(np.sum(rir ** 2))
         if rir.ndim == audio.ndim:
-            audio = signal.convolve(audio, rir, mode='full')[:,:self.max_audio]
-        audio, _ = norm_wav(audio)
-        return audio
+            audio = signal.convolve(audio, rir, mode='full')[:, :self.max_audio]
+        return audio.astype(np.int16).astype(float)
 
 
 class Train_Dataset(Dataset):
-    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, aug_prob, **kwargs):
+    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, enroll_frames, aug_prob, **kwargs):
         self.train_path = train_path
         self.aug_prob = aug_prob
         self.max_frames = max_frames
+        self.enroll_frames = enroll_frames
         # Load data & labels
         self.data_list = []
         self.data_label = []
@@ -145,7 +160,7 @@ class Train_Dataset(Dataset):
     def __getitem__(self, index):
 
         enroll_index, test_index, is_match = index
-        enroll_audio = loadWAV(os.path.join(self.train_path, self.data_list[enroll_index]), self.max_frames)
+        enroll_audio = loadWAV(os.path.join(self.train_path, self.data_list[enroll_index]), self.enroll_frames)
 
         # test
         test_audio = loadWAV(os.path.join(self.train_path, self.data_list[test_index]), self.max_frames)
@@ -154,7 +169,7 @@ class Train_Dataset(Dataset):
         if random.uniform(0, 1) < self.aug_prob:
             test_audio = self.audio_aug(test_audio)
 
-        return torch.FloatTensor(enroll_audio), torch.FloatTensor(test_audio), is_match
+        return torch.FloatTensor(enroll_audio), torch.FloatTensor(test_audio), self.data_label[enroll_index], self.data_label[test_index]
 
     def __len__(self):
         return len(self.data_list)
@@ -163,15 +178,13 @@ class Train_Dataset(Dataset):
 
 
 class BalancedBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, hardspk_path, drop_last = True, pos_prob=0.5, start_epoch=0, **kwargs):
+    def __init__(self, dataset, batch_size, drop_last=True, pos_prob=1.0, **kwargs):
         self.dataset = dataset
         self.batch_size = batch_size
         self.pos_prob = pos_prob
         self.drop_last = drop_last
         self.samespk_dict = self._samespk_indices(self.dataset.data_label)
-        self.epoch = start_epoch
-        with open(hardspk_path, 'r') as file:
-            self.hardspk_dict = json.load(file)
+
 
     def __iter__(self):
         enroll_indices = np.arange(0, len(self.dataset))
@@ -184,7 +197,7 @@ class BalancedBatchSampler(Sampler):
                 batch = []
         if len (batch) > 0 and not self.drop_last:
             yield batch
-        self.epoch += 1
+
 
     def __len__(self):
         if self.drop_last:
@@ -216,42 +229,21 @@ class BalancedBatchSampler(Sampler):
         start, end = self.samespk_dict[self.dataset.data_label[index]]
         return np.random.randint(start, end+1)
 
-    # def _neg_random_sample(self, index):
-    #     # 随机获取与之来源于不同说话人的语音
-    #     start, end = self.samespk_dict[self.dataset.data_label[index]]
-    #     # neg_arr = np.setdiff1d(np.arange(0, len(self.dataset)), np.arange(start, end+1))
-    #     random_negs = np.random.randint(0, len(self.dataset), size=5)
-    #     filtered_negs = random_negs[(random_negs < start) | (random_negs > end)]
-    #     return np.random.choice(filtered_negs)
-
     def _neg_random_sample(self, index):
         # 随机获取与之来源于不同说话人的语音
-        # 分段，前十个epoch0.5-0.1递减，后十个epoch0.2-0.01递减
-        spk_list = self.hardspk_dict[self.dataset.label_name[self.dataset.data_label[index]]]
-        if self.epoch < 10:
-            p = 0.5 - self.epoch * 0.03
-            if random.random() >= p:
-                spk_list = spk_list[:int(p*len(spk_list))]
-            else:
-                spk_list = spk_list[int(p*len(spk_list)):]
-        else:
-            p = 0.39 - min(self.epoch, 20) * 0.019
-            if random.random() >= 0.1:
-                spk_list = spk_list[:int(p*len(spk_list))]
-            else:
-                spk_list = spk_list[int(p*len(spk_list)):]
-
-        spk_index = self.dataset.label_name[random.choice(spk_list)]
-        start, end = self.samespk_dict[spk_index]
-        return np.random.randint(start, end+1)
+        start, end = self.samespk_dict[self.dataset.data_label[index]]
+        # neg_arr = np.setdiff1d(np.arange(0, len(self.dataset)), np.arange(start, end+1))
+        random_negs = np.random.randint(0, len(self.dataset), size=5)
+        filtered_negs = random_negs[(random_negs < start) | (random_negs > end)]
+        return np.random.choice(filtered_negs)
 
 
 
 
 class BalancedDistributedSampler(DistributedSampler):
-    def __init__(self, dataset: Dataset, batch_size, hardspk_path, num_replicas: Optional[int] = None,
-                 pos_prob = 0.5, rank: Optional[int] = None, shuffle: bool = True,
-                 seed: int = 0, drop_last: bool = True, start_epoch=0, **kwargs) -> None:
+    def __init__(self, dataset: Dataset, batch_size, num_replicas: Optional[int] = None,
+                 pos_prob=1.0, rank: Optional[int] = None, shuffle: bool = True,
+                 seed: int = 0, drop_last: bool = True, **kwargs) -> None:
         if num_replicas is None:
             if not dist.is_available():
                 raise RuntimeError("Requires distributed package to be available")
@@ -267,12 +259,8 @@ class BalancedDistributedSampler(DistributedSampler):
         self.batch_size = batch_size
         self.num_replicas = num_replicas
         self.rank = rank
-        self.epoch = start_epoch
         self.drop_last = drop_last
         self.pos_prob = pos_prob
-
-        with open(hardspk_path, 'r') as file:
-            self.hardspk_dict = json.load(file)
 
         # If the dataset length is evenly divisible by # of replicas, then there
         # is no need to drop any data, since the dataset will be split equally.
@@ -379,25 +367,11 @@ class BalancedDistributedSampler(DistributedSampler):
 
     def _neg_random_sample(self, index):
         # 随机获取与之来源于不同说话人的语音
-        # 分段，前十个epoch0.5-0.1递减，后十个epoch0.2-0.01递减
-        spk_list = self.hardspk_dict[self.dataset.label_name[self.dataset.data_label[index]]]
-
-        if self.epoch < 10:
-            p = 0.5 - self.epoch * 0.04
-            if random.random() >= p:
-                spk_list = spk_list[:int(p * len(spk_list))]
-            else:
-                spk_list = spk_list[int(p * len(spk_list)):]
-        else:
-            p = 0.39 - min(self.epoch, 20) * 0.019
-            if random.random() >= 0.1:
-                spk_list = spk_list[:int(p * len(spk_list))]
-            else:
-                spk_list = spk_list[int(p * len(spk_list)):]
-
-        spk_index = self.dataset.label_name[random.choice(spk_list)]
-        start, end = self.samespk_dict[spk_index]
-        return np.random.randint(start, end + 1)
+        start, end = self.samespk_dict[self.dataset.data_label[index]]
+        # neg_arr = np.setdiff1d(np.arange(0, len(self.dataset)), np.arange(start, end+1))
+        random_negs = np.random.randint(0, len(self.dataset), size=5)
+        filtered_negs = random_negs[(random_negs < start) | (random_negs > end)]
+        return np.random.choice(filtered_negs)
 
 
 
@@ -430,7 +404,7 @@ class Test_Dataset(Dataset):
 
 
 class MixBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, drop_last = True, pos_prob=0.5, **kwargs):
+    def __init__(self, dataset, batch_size, drop_last = True, pos_prob=1.0, **kwargs):
         self.dataset = dataset
         self.batch_size = batch_size
         self.pos_prob = pos_prob
@@ -456,13 +430,15 @@ class MixBatchSampler(Sampler):
         else:
             return (len(self.dataset) + self.batch_size - 1) // self.batch_size
 
-
     def return_indices(self, i):
+        test_index = self._pos_random_sample(self.enroll_indices[i]) if i % self.batch_size < self.batch_size * self.pos_prob else self._neg_random_sample(self.enroll_indices[i])
+        test2_index = self._pos_random_sample(test_index)
+        mix_index = self._neg_random_sample(self.enroll_indices[i])
+        mix2_index = self._pos_random_sample(mix_index)
         return [self.enroll_indices[i],
-                self._pos_random_sample(self.enroll_indices[i]) if i%self.batch_size < self.batch_size*self.pos_prob
-                else self._neg_random_sample(self.enroll_indices[i]),
-                self._neg_random_sample(self.enroll_indices[i]),
-                1 if i%self.batch_size < self.batch_size*self.pos_prob else 0]
+                test_index, test2_index,
+                mix_index, mix2_index,
+                1 if i % self.batch_size < self.batch_size * self.pos_prob else 0]
 
     def _shuffle_indices(self, indices):
         np.random.shuffle(indices)
@@ -496,7 +472,7 @@ class MixBatchSampler(Sampler):
 
 class MixDistributedSampler(DistributedSampler):
     def __init__(self, dataset: Dataset, batch_size, num_replicas: Optional[int] = None,
-                 pos_prob = 0.5, rank: Optional[int] = None, shuffle: bool = True,
+                 pos_prob = 1.0, rank: Optional[int] = None, shuffle: bool = True,
                  sampler_seed: int = 0, drop_last: bool = True, **kwargs) -> None:
         if num_replicas is None:
             if not dist.is_available():
@@ -594,10 +570,13 @@ class MixDistributedSampler(DistributedSampler):
         self.epoch = epoch
 
     def return_indices(self, i):
+        test_index = self._pos_random_sample(self.enroll_indices[i]) if i % self.batch_size < self.batch_size * self.pos_prob else self._neg_random_sample(self.enroll_indices[i])
+        test2_index = self._pos_random_sample(test_index)
+        mix_index = self._neg_random_sample(self.enroll_indices[i])
+        mix2_index = self._pos_random_sample(mix_index)
         return [self.enroll_indices[i],
-                self._pos_random_sample(self.enroll_indices[i]) if i % self.batch_size < self.batch_size * self.pos_prob
-                else self._neg_random_sample(self.enroll_indices[i]),
-                self._neg_random_sample(self.enroll_indices[i]),
+                test_index, test2_index,
+                mix_index, mix2_index,
                 1 if i % self.batch_size < self.batch_size * self.pos_prob else 0]
 
 
@@ -632,10 +611,11 @@ class MixDistributedSampler(DistributedSampler):
 
 
 class Mix_Train_Dataset(Dataset):
-    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, aug_prob, **kwargs):
+    def __init__(self, train_list, train_path, musan_path, rir_path, max_frames, enroll_frames, aug_prob, **kwargs):
         self.train_path = train_path
         self.max_frames = max_frames
         self.max_audio = max_frames * 160 + 240
+        self.enroll_frames = enroll_frames
         self.aug_prob = aug_prob
         # Load data & labels
         self.data_list = []
@@ -660,8 +640,6 @@ class Mix_Train_Dataset(Dataset):
         self.augment_wav = AugmentWAV(musan_path, rir_path, max_frames=max_frames)
 
     def partly_mix_audio(self, mix_audio_1, mix_audio_2):
-        # mix_audio_1和mix_audio_2都为2s
-        # 重合比例 [0, 0.5]
         overlap_ratio = random.uniform(0.1, 0.9)  # 总长度overlap的比例
         overlap_length = int(self.max_audio * overlap_ratio)
         # 开始进行overlap的位置
@@ -692,11 +670,11 @@ class Mix_Train_Dataset(Dataset):
         return mixed_audio
 
     def concat_audio(self, mix_audio_1, mix_audio_2):
-        # 计算两个语音信号的能量
-        energy_audio_1 = np.sum(mix_audio_1 ** 2)
-        energy_audio_2 = np.sum(mix_audio_2 ** 2)
-        # 根据能量调整第二个语音的幅度
-        mix_audio_2 = np.sqrt(energy_audio_1 / energy_audio_2) * mix_audio_2
+        mix_audio_db_1 = 10 * np.log10(np.mean(mix_audio_1 ** 2) + 1e-4)
+        mix_audio_db_2 = 10 * np.log10(np.mean(mix_audio_2 ** 2) + 1e-4)
+        snr = random.uniform(-3, 3)
+        mix_audio_2 *= np.sqrt(10 ** ((mix_audio_db_1 - mix_audio_db_2 - snr) / 10))
+
         mixed_audio = np.zeros((1, self.max_audio * 2))
         mixed_audio[:, 0:self.max_audio] = mix_audio_1
         mixed_audio[:, self.max_audio:] = mix_audio_2
@@ -704,6 +682,18 @@ class Mix_Train_Dataset(Dataset):
         mixed_audio = mixed_audio[:, start_frame:start_frame + self.max_audio]
         mixed_audio, _ = norm_wav(mixed_audio)
         return mixed_audio
+
+    def add_noise_audio(self, mix_audio_1):
+        augtype = random.randint(1, 3)
+        if augtype == 1:  # Babble
+            mixed_audio = self.augment_wav.additive_mixnoise('speech', mix_audio_1)
+        elif augtype == 2:  # Music
+            mixed_audio = self.augment_wav.additive_mixnoise('music', mix_audio_1)
+        elif augtype == 3:  # Noise
+            mixed_audio = self.augment_wav.additive_mixnoise('noise', mix_audio_1)
+        mixed_audio, _ = norm_wav(mixed_audio)
+        return mixed_audio
+
 
     def front_prob_mix(self, mix_audio_1, mix_audio_2):
         front_prob = random.uniform(0, 1)
@@ -758,6 +748,30 @@ class Mix_Train_Dataset(Dataset):
             test_audio = self.audio_aug(test_audio)
 
         return torch.FloatTensor(enroll_audio), torch.FloatTensor(test_audio), is_match
+
+    def __getitem__(self, index):
+
+        enroll_index, test_index, test2_index, mix_index, mix2_index, is_match = index
+        enroll_audio = loadWAV(os.path.join(self.train_path, self.data_list[enroll_index]), self.enroll_frames)
+
+        # test
+        test_audio = loadWAV(os.path.join(self.train_path, self.data_list[test_index]), self.max_frames)
+        mix_audio = loadWAV(os.path.join(self.train_path, self.data_list[mix_index]), self.max_frames)
+
+        mix_prob = random.uniform(0, 1)
+        if mix_prob > 0.9:
+            test_audio = self.add_noise_audio(test_audio)
+        if mix_prob < 0.7:
+            test_audio = self.front_prob_mix(test_audio, mix_audio)
+        if mix_prob < 0.9 and random.uniform(0, 1) < self.aug_prob:
+            test_audio = self.audio_aug(test_audio)
+
+        if mix_prob < 0.7:
+            extra_audio = loadWAV(os.path.join(self.train_path, self.data_list[mix2_index]), self.max_frames)
+            return torch.FloatTensor(enroll_audio), torch.FloatTensor(extra_audio), torch.FloatTensor(test_audio), self.data_label[enroll_index], self.data_label[mix2_index], self.data_label[test_index], self.data_label[mix_index]
+        else:
+            extra_audio = loadWAV(os.path.join(self.train_path, self.data_list[test2_index]), self.max_frames)
+            return torch.FloatTensor(enroll_audio), torch.FloatTensor(extra_audio), torch.FloatTensor(test_audio), self.data_label[enroll_index], self.data_label[test2_index], self.data_label[test_index], self.data_label[test_index]
 
     def __len__(self):
         return len(self.data_list)
