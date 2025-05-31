@@ -21,7 +21,7 @@ def Create_data(input_dir, output_dir, trial_path, noise_list, overlap_min, over
     utt_paths = glob.glob(os.path.join(input_dir, '*/*/*.wav'))
     print('Sucessfully obtain all utterances from {}'.format(trial_path))
     # Get all noise paths in noise_list
-    noise_lines = open(trial_path, 'r').readlines()
+    noise_lines = open(noise_list, 'r').readlines()
     print('Sucessfully obtain all noise from {}'.format(noise_list))
 
     # Sort the order of trials, let the test utterances in character order

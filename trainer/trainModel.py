@@ -111,15 +111,15 @@ class trainModel(LightningModule):
 
 
     def evaluate_forward(self, enroll_embs, test_utt):
-        enroll_embs = self.scoring_linear2(enroll_embs)  # [N, 1, 256]
+        enroll_embs = self.scoring_linear2(enroll_embs).transpose(0, 1)  # [1, N, 256]
 
         # scoring model
         test_feature, test_emb = self.testencoder(test_utt)
         test_feature = test_feature.transpose(1, 2)
         test_feature = self.scoring_linear1(test_feature)
 
-        outputs = self.transformer_model(enroll_embs, test_feature)[:, :enroll_embs.size(0), :]
-        score = self.mlp(outputs).squeeze(1)  # [N]
+        outputs = self.transformer_model(enroll_embs, test_feature)[:, :enroll_embs.size(1), :]
+        score = self.mlp(outputs).squeeze(1)  # [1, N]
         score = torch.sigmoid(score)
 
         return score
@@ -310,7 +310,7 @@ class trainModel(LightningModule):
                 # 计算分数
                 scores = self.evaluate_forward(current_enroll_embs, test_utt)
 
-                all_scores.extend(scores.cpu().numpy())
+                all_scores.extend(scores[0].cpu().numpy())
                 all_labels.extend(current_labels)
 
 
