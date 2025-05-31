@@ -1,9 +1,8 @@
 # NS-SV: Neural Scoring for speaker verification
 
-This is an open-source project that develops a novel framework for speaker verification. The code is developed based on [sunine](https://gitlab.com/csltstu/sunine).
+This is an open-source project that develops a novel framework for speaker verification. The code is developed based on [sunine](https://gitlab.com/csltstu/sunine/-/tree/develop/).
 In this project, our goal is to design a "general solver", which could operate effectively across a wide range of real-world scenarios (eg. clean, noisy, multi-speaker).
 
-If you find this project beneficial for your research, we kindly encourage you to cite [our paper](https://arxiv.org/abs/2410.16428).
 
 
 ## Overview
@@ -34,7 +33,9 @@ Note that the configuration files should be modified before running the commands
 
 ### Data simulation
 
-Data simulation tool is provided. Users can generate datasets and trial lists for the test scenarios, thereby facilitating the reproduction of the validation results from our paper.
+We provide test datasets for four conditions(Noisy, Concatenation, Overlap, Mixing), which is simulated from [VoxCeleb1](https://www.robots.ox.ac.uk/~vgg/data/voxceleb/vox1.html) and can be found on [Huggingface.co](https://huggingface.co/datasets/Dozingofff/NS-Vox-Complex/tree/main) .
+
+To generate datasets and trial lists, run the following command:
 
 ```base
 python steps/create_evaldata.py
@@ -42,25 +43,17 @@ python steps/create_evaldata.py
 
 ### Model Training
 
-#### Step1: Prepare enroll model
+#### Step1: Prepare enrollment model
 
-Users can directly use our pre-trained model `source\resnet34_avg.ckpt`, or retrain a new model using [sunine](https://gitlab.com/csltstu/sunine).
+The enrollment model can be pre-trained using [sunine](https://gitlab.com/csltstu/sunine/-/tree/develop/).
 
-#### Step2: Prepare hard speaker dict
-
-Prepare hard speaker dict to do difficult sample mining.
-
-```base
-python steps/create_hardspk_dict.py
-```
-
-#### Step3: Train model for clean-scenario
+#### Step2: Train NS model for clean-scenario
 
 ```base
 python main.py --config conf/ns_clean.yaml
 ```
 
-#### Step4: Train model for multi-scenario
+#### Step3: Train NS model for multi-scenario
 
 ```base
 python main.py --config conf/ns_multi.yaml
@@ -78,13 +71,15 @@ python steps/avg_model.py
 bash eval.sh
 ```
 
-## Citation
+### Model Performance
 
-```base
-@article{lin2024neural,
-  title={Neural Scoring, Not Embedding: A Novel Framework for Robust Speaker Verification},
-  author={Lin, Wan and Chen, Junhui and Wang, Tianhao and Zhou, Zhenyu and Li, Lantian and Wang, Dong},
-  journal={arXiv preprint arXiv:2410.16428},
-  year={2024}
-}
-```
+Model performance on VoxCeleb1 and four corrupted test set is shown in the tables below.
+
+#### Vox1-O
+<img src="source/Results_Vox1_O.png" alt="Vox1_O" width="1000"/>
+
+#### Vox1-E
+<img src="source/Results_Vox1_E.png" alt="Vox1_E" width="1000"/>
+
+#### Vox1-H
+<img src="source/Results_Vox1_H.png" alt="Vox1_H" width="1000"/>
